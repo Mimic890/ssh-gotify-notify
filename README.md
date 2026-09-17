@@ -1,28 +1,146 @@
 # ssh-gotify-notify
 
-Know who logged into your servers, from where, and for how long.
+Кто, откуда и насколько зашёл на твой сервер по SSH.
 
-Hooks into PAM via `pam_exec` and pushes a notification to your
-[Gotify](https://gotify.net) server on session open and close.
+Подключается к PAM через `pam_exec` и шлёт уведомление в
+[Gotify](https://gotify.net) при открытии и закрытии сессии.
 
-**Login notification includes:** username, source IP, reverse DNS,
-city/country/ASN (via ipinfo.io), auth method (publickey/password),
-TTY, timestamp, host uptime.
+**Вход:** пользователь, IP, rDNS, город/страна/ASN (через ipinfo.io),
+метод аутентификации (publickey/password), TTY, время, uptime хоста.
 
-**Logout notification includes:** username, source IP, session duration.
+**Выход:** пользователь, IP, длительность сессии.
 
-## Install
-
-### Debian / Ubuntu
-```bash
-curl -fsSLO https://raw.githubusercontent.com/USER/sshgotify/main/install-ssh-notify.sh
-sudo bash install-ssh-notify.sh
 ```
-Prompts for your Gotify URL and application token, installs dependencies,
-sends two test messages, and only then touches PAM. If Gotify doesn't
-respond, nothing is modified.
+SSH вход: alice@web-01
+Пользователь: alice
+IP:           203.0.113.42
+rDNS:         host.example.net
+Гео:          Berlin, Berlin, DE, AS3320 Deutsche Telekom AG
+Метод:        publickey
+TTY:          pts/0
+Время:        2026-09-17 21:30:24 MSK
+Uptime:       up 12 days, 4 hours
+```
+
+## Установка
+
+Скачай управляющую команду в `/usr/local/bin` и сделай исполняемой:
+
+```bash
+sudo curl -fsSL https://raw.githubusercontent.com/Mimic890/ssh-gotify-notify/main/install-ssh-notify.sh -o /usr/local/bin/ssh-notify-ctl && sudo chmod +x /usr/local/bin/ssh-notify-ctl
+```
+
+Дальше всё делается командой `ssh-notify-ctl`, путь помнить не нужно:
+
+```bash
+sudo ssh-notify-ctl install
+```
+
+Установщик спросит URL и токен, поставит `curl` и `jq`, отправит два
+тестовых сообщения — и только если они дошли, тронет PAM. Не дошли —
+ничего не меняется.
+
+Поддерживаются Debian, Ubuntu, Arch, Fedora, openSUSE и Alpine: пакеты
+ставятся через `apt-get`, `pacman`, `dnf`, `yum`, `zypper` или `apk` —
+какой найдётся. Проверялось вживую только на Debian/Ubuntu.
+
+### Команды
+
+```bash
+sudo ssh-notify-ctl status
+```
+
+```bash
+sudo ssh-notify-ctl test
+```
+
+```bash
+sudo ssh-notify-ctl logs
+```
+
+```bash
+sudo ssh-notify-ctl install
+```
+
+```bash
+sudo ssh-notify-ctl uninstall
+```
+
+`install` можно запускать повторно — это же и есть перенастройка: на
+любой вопрос Enter оставляет текущее значение.
+
+### История входов
+
+Каждое событие пишется в `/var/log/ssh-notify.log` тем же блоком, что
+уходит в Gotify, **независимо от того, дошло ли уведомление**. Если
+Gotify был недоступен, событие всё равно в истории, с пометкой:
+
+```
+=== 2026-09-17 21:30:24 MSK · вход · alice · 203.0.113.42 ===
+Пользователь: alice
+IP:           203.0.113.42
+rDNS:         host.example.net
+Гео:          Berlin, Berlin, DE, AS3320 Deutsche Telekom AG
+Метод:        publickey
+TTY:          pts/0
+Время:        2026-09-17 21:30:24 MSK
+Uptime:       up 12 days, 4 hours
+```
+
+Смотреть можно прямо файлом, а можно командой — она умеет фильтровать и
+подсвечивать:
+
+```bash
+sudo ssh-notify-ctl logs -n 5
+```
+
+```bash
+sudo ssh-notify-ctl logs -f
+```
+
+| Опция | Что делает |
+| --- | --- |
+| `-n N`, `--lines N` | последние N записей (по умолчанию 20) |
+| `-a`, `--all` | все записи |
+| `-f`, `--follow` | следить в реальном времени |
+| `-u`, `--user ПОДСТР` | фильтр по пользователю |
+| `-i`, `--ip ПОДСТР` | фильтр по адресу |
+| `--open` / `--close` | только входы / только выходы |
+| `--failed` | только недоставленные в Gotify |
+| `-g`, `--grep ТЕКСТ` | поиск по всему тексту записи |
+| `--since КОГДА` | новее указанного: `today`, `вчера`, `2026-09-17`, `-2 hours` |
+| `--stats` | сводка: сколько, кто чаще, откуда чаще |
+| `--path` | путь к файлу лога |
+| `--no-color` | без подсветки |
+
+Фильтры комбинируются и работают в том числе с `-f`:
+
+```bash
+sudo ssh-notify-ctl logs -u alice --since today --failed
+```
+
+Ротацию ставит сам установщик в `/etc/logrotate.d/ssh-notify`: еженедельно,
+8 архивов, сжатие. Файл создаётся с правами 640 root:adm — внутри имена
+пользователей и адреса. Выключить логирование можно, задав пустой
+`LOG_FILE` в конфиге или ответив `нет` при установке.
+
+Параллельно каждое событие уходит в syslog одной структурированной
+строкой — это выручит, если файл удалят, и хорошо грепается:
+
+```bash
+journalctl -t ssh-notify | grep 'user=alice'
+```
+
+`uninstall` убирает всё: строку из PAM, скрипты, состояние, свои бэкапы
+PAM и саму команду `ssh-notify-ctl`. Про конфиг с токеном спросит
+отдельно (`--yes` — удалить без вопросов). `sshd_config` не трогается.
 
 ### NixOS
+
+Установщик здесь не нужен и откажется работать. Возьми из репозитория
+два файла — `ssh-notify.nix` и `ssh-notify.sh`, — положи рядом друг с
+другом в свои модули и подключи:
+
 ```nix
 imports = [ ./ssh-notify.nix ];
 
@@ -30,16 +148,116 @@ services.sshNotify = {
   enable = true;
   url = "https://gotify.example.com";
   tokenFile = config.sops.secrets.gotify-ssh-token.path;
+  ignoreNets = [ "10.*" "192.168.*" ];
 };
 ```
 
-## Notes
+`tokenFile` — путь строкой, а не literal-путь вида `./token`: второй Nix
+скопировал бы в `/nix/store`, читаемый любым пользователем системы.
 
-- Notifications fire on **successful** logins only. For failed attempts
-  use fail2ban or CrowdSec with a Gotify action — otherwise an
-  internet-facing port 22 will flood your phone.
-- The PAM rule is `optional`, so a broken script cannot lock you out.
-- Geolocation is optional (`--no-geo`). ipinfo.io allows 1000 lookups
-  per month without a token.
-- Use a dedicated Gotify application so SSH alerts can be muted
-  separately from your other services.
+## Настройки
+
+Правятся в `/etc/ssh-notify.conf` — скрипт перечитывает файл на каждый
+вход, перезапускать ничего не нужно. На NixOS это одноимённые опции
+`services.sshNotify` в camelCase.
+
+| Ключ | По умолчанию | Что делает |
+| --- | --- | --- |
+| `GOTIFY_URL` | — | Базовый URL Gotify, завершающий слэш убирается сам |
+| `GOTIFY_TOKEN` | — | Application-токен |
+| `GOTIFY_TOKEN_FILE` | — | Путь к файлу с токеном вместо самого токена |
+| `GEO_LOOKUP` | `1` | Гео через ipinfo.io |
+| `REQUIRE_TTY` | `0` | `1` — только интерактивные сессии, без sftp/scp/rsync |
+| `NOTIFY_CLOSE` | `1` | `0` — молчать про выход |
+| `IGNORE_USERS` | пусто | Не уведомлять об этих пользователях |
+| `IGNORE_NETS` | пусто | Не уведомлять об этих адресах |
+| `PRIORITY_OPEN` | `7` | Приоритет уведомления о входе |
+| `PRIORITY_CLOSE` | `3` | Приоритет уведомления о выходе |
+| `HTTP_TIMEOUT` | `10` | Таймаут запроса к Gotify, секунды |
+| `GEO_TIMEOUT` | `5` | Таймаут запроса к ipinfo.io, секунды |
+| `LOG_FILE` | `/var/log/ssh-notify.log` | Файл истории, пусто — не вести |
+
+Приоритет 8 и выше пробивает «не беспокоить» на Android.
+
+### Списки исключений
+
+`IGNORE_USERS` и `IGNORE_NETS` — glob-шаблоны через пробел, **не CIDR**:
+
+```sh
+IGNORE_USERS="backup rsync-*"
+IGNORE_NETS="10.* 192.168.* 203.0.113.5"
+```
+
+Без них резервные копии и мониторинг будут звонить в телефон круглые
+сутки, а алерты, которые звонят слишком часто, перестают работать.
+
+## Диагностика
+
+Скрипт пишет в syslog под тегом `ssh-notify` — и успехи, и любой сбой
+доставки:
+
+```bash
+journalctl -t ssh-notify -n 20
+```
+
+Проверить отправку, не заходя по SSH:
+
+```bash
+sudo ssh-notify-ctl test
+```
+
+Если вход по SSH сломался, из уже открытой сессии:
+
+```bash
+sudo sed -i '/ssh-notify-wrap/d' /etc/pam.d/sshd
+```
+
+## Как это устроено
+
+`pam_exec` вызывается синхронно, поэтому недоступный Gotify задержал бы
+логин на весь таймаут `curl`. Между PAM и основным скриптом стоит
+обёртка: она запускает работу через `setsid` в фоне и возвращает
+управление за миллисекунду. Правило PAM — `optional`, так что сломанный
+скрипт не может закрыть тебе вход.
+
+Раскладка файлов:
+
+| Путь | Что это |
+| --- | --- |
+| `/usr/local/bin/ssh-notify-ctl` | управляющая команда (этот же установщик) |
+| `/usr/local/bin/ssh-notify` | рабочий скрипт, шлёт уведомление |
+| `/usr/local/bin/ssh-notify-wrap` | обёртка для `pam_exec` |
+| `/etc/ssh-notify.conf` | настройки и токен, права 600 |
+| `/var/log/ssh-notify.log` | история входов и выходов, права 640 root:adm |
+| `/etc/logrotate.d/ssh-notify` | правило ротации лога |
+| `/run/ssh-notify/` | время начала сессий, чтобы считать длительность |
+
+Длительность считается через файл в `/run/ssh-notify`, имя файла — PID
+процесса sshd, обслуживающего сессию. Если открытие и закрытие почему-то
+обработали разные процессы, в уведомлении будет «Длительность:
+неизвестно» — на сам вход это не влияет. Осиротевшие файлы старше недели
+подчищаются автоматически.
+
+`ssh-notify.sh` в репозитории — единственный источник правды.
+`ssh-notify.nix` читает его через `builtins.readFile`, а
+`install-ssh-notify.sh` носит встроенную копию, чтобы оставаться
+однофайловым для `curl`. После правки скрипта:
+
+```bash
+./tools/sync-embedded.sh
+```
+
+## Ограничения
+
+- Уведомления приходят только на **успешные** входы. Для неудачных попыток
+  нужен fail2ban или CrowdSec с действием в Gotify — иначе торчащий в
+  интернет 22-й порт зальёт телефон.
+- Гео определяется только для публичных адресов. ipinfo.io без токена
+  отдаёт 1000 запросов в месяц.
+- Заведи для SSH отдельное приложение в Gotify, чтобы эти уведомления
+  можно было отключить отдельно от остальных.
+- Записи дописываются в лог в момент обработки события, а вход ещё ждёт
+  геозапрос. У совсем короткой сессии выход может оказаться в файле выше
+  входа — ориентируйся на штамп времени в записи, он снимается до всех
+  сетевых запросов.
+- Тексты уведомлений русские и зашиты в `ssh-notify.sh`.
