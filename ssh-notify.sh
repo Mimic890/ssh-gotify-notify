@@ -26,6 +26,7 @@ PRIORITY_OPEN=7
 PRIORITY_CLOSE=3
 IGNORE_USERS=""
 IGNORE_NETS=""
+IGNORE_PAIRS=""
 HTTP_TIMEOUT=10
 GEO_TIMEOUT=5
 LOG_FILE=/var/log/ssh-notify.log
@@ -75,6 +76,18 @@ if [ -n "$IGNORE_USERS" ] && matches "${PAM_USER:-}" "$IGNORE_USERS"; then
 fi
 if [ -n "$IGNORE_NETS" ] && matches "${PAM_RHOST:-}" "$IGNORE_NETS"; then
   exit 0
+fi
+
+# Точечные исключения "пользователь@адрес": тот же пользователь с другого
+# адреса или другой пользователь с того же адреса по-прежнему уведомляют.
+if [ -n "$IGNORE_PAIRS" ]; then
+  for pair in $IGNORE_PAIRS; do
+    upat="${pair%%@*}"
+    ipat="${pair#*@}"
+    if matches "${PAM_USER:-}" "$upat" && matches "${PAM_RHOST:-}" "$ipat"; then
+      exit 0
+    fi
+  done
 fi
 
 # ---------- состояние ----------

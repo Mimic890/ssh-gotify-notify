@@ -1,22 +1,25 @@
 #!/usr/bin/env bash
 # Управление уведомлениями о SSH-сессиях в Gotify.
 #
-#   ssh-notify-ctl install     установка или перенастройка
-#   ssh-notify-ctl test        отправить тестовые сообщения
-#   ssh-notify-ctl status      показать состояние
-#   ssh-notify-ctl logs        история входов и выходов (logs --help — опции)
-#   ssh-notify-ctl uninstall   удалить подчистую
-#   ssh-notify-ctl help        эта справка
+#   ssh-notify              статус и общая информация (без аргументов — то же самое)
+#   ssh-notify install      установка или перенастройка
+#   ssh-notify test         отправить тестовые сообщения
+#   ssh-notify status       показать состояние
+#   ssh-notify logs         история входов и выходов (logs --help — опции)
+#   ssh-notify update       обновиться до последней версии с GitHub
+#   ssh-notify uninstall    удалить подчистую
+#   ssh-notify help         эта справка
 #
 # Debian, Ubuntu, Arch, Fedora, openSUSE, Alpine.
 # На NixOS ставить не нужно: импортируй ssh-notify.nix как модуль.
 
 set -euo pipefail
 
-VERSION=2.0
+VERSION=2.1
+REPO_RAW="https://raw.githubusercontent.com/Mimic890/ssh-gotify-notify/main"
 
-CTL=/usr/local/bin/ssh-notify-ctl
-MAIN=/usr/local/bin/ssh-notify
+CTL=/usr/local/bin/ssh-notify
+MAIN=/usr/local/bin/ssh-notify-worker
 WRAP=/usr/local/bin/ssh-notify-wrap
 CONF=/etc/ssh-notify.conf
 PAMFILE=/etc/pam.d/sshd
@@ -24,13 +27,15 @@ STATE=/run/ssh-notify
 LOGROTATE=/etc/logrotate.d/ssh-notify
 PAMLINE="session optional pam_exec.so quiet $WRAP"
 
-# Пути из версий до 2.0 — нужны, чтобы uninstall подчищал и старые установки.
-LEGACY=(/usr/local/bin/ssh-notify.sh /usr/local/bin/ssh-notify-wrap.sh)
+# Пути из версий до 2.1 — нужны, чтобы uninstall и переустановка подчищали
+# старые установки. До 2.1 сама команда управления называлась ssh-notify-ctl,
+# а /usr/local/bin/ssh-notify был воркером — теперь наоборот.
+LEGACY=(/usr/local/bin/ssh-notify.sh /usr/local/bin/ssh-notify-wrap.sh /usr/local/bin/ssh-notify-ctl)
 
 die() { echo "ОШИБКА: $*" >&2; exit 1; }
 info() { echo "  $*"; }
 
-usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # Скрипт могут запустить как `curl ... | bash`, тогда stdin занят самим
 # скриптом и read прочитал бы его текст вместо ответа пользователя.
@@ -38,18 +43,20 @@ ask() {
   local prompt="$1" silent="${2:-}" reply=""
   # Проверять -r /dev/tty нельзя: без управляющего терминала узел на месте
   # и права позволяют, но open() возвращает ENXIO. Пробуем открыть на самом деле.
+  # -e включает readline: без него стрелки и Backspace на середине строки
+  # печатаются как сырые escape-коды (^[[D) прямо в ответ, а не двигают курсор.
   if { : < /dev/tty; } 2>/dev/null; then
     if [ "$silent" = "silent" ]; then
-      read -rsp "$prompt" reply < /dev/tty || reply=""
+      read -ersp "$prompt" reply < /dev/tty || reply=""
       echo >&2
     else
-      read -rp "$prompt" reply < /dev/tty || reply=""
+      read -erp "$prompt" reply < /dev/tty || reply=""
     fi
   elif [ "$silent" = "silent" ]; then
-    read -rsp "$prompt" reply || reply=""
+    read -ersp "$prompt" reply || reply=""
     echo >&2
   else
-    read -rp "$prompt" reply || reply=""
+    read -erp "$prompt" reply || reply=""
   fi
   printf '%s' "$reply"
 }
@@ -135,6 +142,7 @@ PRIORITY_OPEN=7
 PRIORITY_CLOSE=3
 IGNORE_USERS=""
 IGNORE_NETS=""
+IGNORE_PAIRS=""
 HTTP_TIMEOUT=10
 GEO_TIMEOUT=5
 LOG_FILE=/var/log/ssh-notify.log
@@ -184,6 +192,18 @@ if [ -n "$IGNORE_USERS" ] && matches "${PAM_USER:-}" "$IGNORE_USERS"; then
 fi
 if [ -n "$IGNORE_NETS" ] && matches "${PAM_RHOST:-}" "$IGNORE_NETS"; then
   exit 0
+fi
+
+# Точечные исключения "пользователь@адрес": тот же пользователь с другого
+# адреса или другой пользователь с того же адреса по-прежнему уведомляют.
+if [ -n "$IGNORE_PAIRS" ]; then
+  for pair in $IGNORE_PAIRS; do
+    upat="${pair%%@*}"
+    ipat="${pair#*@}"
+    if matches "${PAM_USER:-}" "$upat" && matches "${PAM_RHOST:-}" "$ipat"; then
+      exit 0
+    fi
+  done
 fi
 
 # ---------- состояние ----------
@@ -399,7 +419,7 @@ SCRIPT
 }
 
 # Кладём сам скрипт в PATH, чтобы сервисом можно было управлять
-# командой ssh-notify-ctl, не помня, куда скачан установщик.
+# командой ssh-notify, не помня, куда скачан установщик.
 install_self() {
   local src
   src=$(readlink -f "$0" 2>/dev/null || echo "$0")
@@ -419,8 +439,15 @@ selftest() {
 }
 
 # ---------- подкоманды ----------
+# Без аргументов — то же, что help + status одной командой.
+cmd_info() {
+  usage
+  echo
+  cmd_status
+}
+
 cmd_status() {
-  echo "ssh-notify-ctl $VERSION"
+  echo "ssh-notify $VERSION"
   echo "Команда:   $([ -x "$CTL" ] && echo "$CTL" || echo 'не в PATH')"
   echo "Скрипт:    $([ -x "$MAIN" ] && echo "$MAIN" || echo 'нет')"
   echo "Обёртка:   $([ -x "$WRAP" ] && echo "$WRAP" || echo 'нет')"
@@ -430,6 +457,11 @@ cmd_status() {
     && echo "подключено в $PAMFILE" || echo "НЕ подключено"
   echo "UsePAM:    $(usepam_state)"
   echo "Сессии:    $(find "$STATE" -maxdepth 1 -type f 2>/dev/null | wc -l) активных"
+  local today_users now_users
+  today_users=$(last -s today 2>/dev/null | awk '$1!="" && $1!="wtmp" && $1!="reboot"{print $1}' | sort -u | paste -sd' ' -) || true
+  now_users=$(who 2>/dev/null | awk '{print $1}' | sort -u | paste -sd' ' -) || true
+  echo "Логинились сегодня: ${today_users:-—}"
+  echo "Залогинены сейчас:  ${now_users:-—}"
   local lf=""
   [ -f "$CONF" ] && lf=$(. "$CONF" 2>/dev/null; printf '%s' "${LOG_FILE:-}")
   if [ -n "$lf" ]; then
@@ -447,7 +479,7 @@ cmd_status() {
 }
 
 cmd_test() {
-  [ -x "$MAIN" ] || die "не установлено, сначала: ssh-notify-ctl install"
+  [ -x "$MAIN" ] || die "не установлено, сначала: ssh-notify install"
   selftest || die "Gotify не ответил. Подробности: journalctl -t ssh-notify -n 20"
   echo "Два тестовых сообщения ушли."
 }
@@ -475,7 +507,7 @@ EOF
 # ---------- просмотр лога ----------
 log_usage() {
   cat <<'USAGE'
-ssh-notify-ctl logs [опции] — история входов и выходов
+ssh-notify logs [опции] — история входов и выходов
 
   -n N, --lines N   последние N записей (по умолчанию 20)
   -a, --all         все записи
@@ -492,10 +524,10 @@ ssh-notify-ctl logs [опции] — история входов и выходо
       --no-color    без подсветки
 
 Примеры:
-  ssh-notify-ctl logs -n 5
-  ssh-notify-ctl logs -f
-  ssh-notify-ctl logs -u alice --since today
-  ssh-notify-ctl logs --failed -a
+  ssh-notify logs -n 5
+  ssh-notify logs -f
+  ssh-notify logs -u alice --since today
+  ssh-notify logs --failed -a
 USAGE
 }
 
@@ -566,7 +598,7 @@ cmd_log() {
       --path)      showpath=1; shift ;;
       --no-color)  color=never; shift ;;
       -h|--help)   log_usage; return 0 ;;
-      *) die "неизвестная опция для logs: $1 (см. ssh-notify-ctl logs --help)" ;;
+      *) die "неизвестная опция для logs: $1 (см. ssh-notify logs --help)" ;;
     esac
   done
 
@@ -695,42 +727,40 @@ cmd_install() {
   detect_pm || echo "ВНИМАНИЕ: пакетный менеджер не опознан, curl и jq должны быть уже установлены" >&2
 
   # ---------- параметры ----------
+  # Спрашиваем только то, без чего скрипт вообще не заработает — URL и
+  # токен. Всё остальное (гео, списки исключений, файл лога, приоритеты,
+  # таймауты) живёт только в $CONF: он перечитывается на каждый вход, так
+  # что для смены настройки достаточно отредактировать файл и сохранить —
+  # install перезапускать не нужно.
   GOTIFY_URL=""; GOTIFY_TOKEN=""
   GEO_LOOKUP=1; REQUIRE_TTY=0; NOTIFY_CLOSE=1
-  IGNORE_USERS=""; IGNORE_NETS=""
+  IGNORE_USERS=""; IGNORE_NETS=""; IGNORE_PAIRS=""
   LOG_FILE=/var/log/ssh-notify.log
+
+  local have_conf=0
   if [ -f "$CONF" ]; then
+    have_conf=1
     # shellcheck source=/dev/null
     . "$CONF"
-    echo "Найден $CONF (URL: ${GOTIFY_URL:-—}). Enter — оставить текущее значение."
   fi
 
-  local in_url in_token in_geo in_tty in_close in_iu in_in in_log
-  in_url=$(ask "URL Gotify [${GOTIFY_URL:-https://gotify.example.com}]: ")
-  # Токен не эхоится: установка часто идёт в сессии, которая пишется в скроллбэк.
-  in_token=$(ask "Application-токен [${GOTIFY_TOKEN:+сохранён, Enter — оставить}]: " silent)
-  in_geo=$(ask   "Определять гео через ipinfo.io? [$([ "$GEO_LOOKUP" = 1 ] && echo 'Y/n' || echo 'y/N')]: ")
-  in_tty=$(ask   "Только интерактивные сессии, без sftp/rsync? [$([ "$REQUIRE_TTY" = 1 ] && echo 'Y/n' || echo 'y/N')]: ")
-  in_close=$(ask "Уведомлять о выходе? [$([ "$NOTIFY_CLOSE" = 1 ] && echo 'Y/n' || echo 'y/N')]: ")
-  echo "Списки-исключения: шаблоны через пробел, например 'backup rsync-*' и '10.* 192.168.*'."
-  in_iu=$(ask "Игнорировать пользователей [${IGNORE_USERS:-нет}]: ")
-  in_in=$(ask "Игнорировать адреса [${IGNORE_NETS:-нет}]: ")
-  in_log=$(ask "Файл лога, 'нет' чтобы выключить [${LOG_FILE:-нет}]: ")
+  if [ "$have_conf" = "1" ]; then
+    GOTIFY_URL="${GOTIFY_URL%/}"
+    echo "Конфиг уже есть: $CONF — беру настройки оттуда, ничего не спрашиваю."
+    echo "Поменять что-то: отредактируй файл, перезапуск не нужен."
+  else
+    echo "Первая настройка. Нужны только URL и токен — остальное потом"
+    echo "правится прямо в $CONF (там свои комментарии на каждую настройку)."
+    local in_url in_token
+    in_url=$(ask "URL Gotify: ")
+    # Токен не эхоится: установка часто идёт в сессии, которая пишется в скроллбэк.
+    in_token=$(ask "Application-токен: " silent)
+    GOTIFY_URL="${in_url%/}"
+    GOTIFY_TOKEN="$in_token"
+  fi
 
-  GOTIFY_URL="${in_url:-$GOTIFY_URL}"
-  GOTIFY_TOKEN="${in_token:-$GOTIFY_TOKEN}"
-  GOTIFY_URL="${GOTIFY_URL%/}"
   [ -n "$GOTIFY_URL" ]   || die "URL не задан"
   [ -n "$GOTIFY_TOKEN" ] || die "токен не задан"
-
-  yesno() { case "${1,,}" in y|yes|д|да) echo 1 ;; n|no|н|нет) echo 0 ;; *) echo "$2" ;; esac; }
-  GEO_LOOKUP=$(yesno "$in_geo" "$GEO_LOOKUP")
-  REQUIRE_TTY=$(yesno "$in_tty" "$REQUIRE_TTY")
-  NOTIFY_CLOSE=$(yesno "$in_close" "$NOTIFY_CLOSE")
-  IGNORE_USERS="${in_iu:-$IGNORE_USERS}"
-  IGNORE_NETS="${in_in:-$IGNORE_NETS}"
-  LOG_FILE="${in_log:-$LOG_FILE}"
-  case "${LOG_FILE,,}" in нет|no|none|off|-) LOG_FILE="" ;; esac
 
   # ---------- зависимости ----------
   local missing=()
@@ -757,6 +787,8 @@ NOTIFY_CLOSE=$NOTIFY_CLOSE
 # Списки исключений: glob-шаблоны через пробел, не CIDR.
 IGNORE_USERS="$IGNORE_USERS"
 IGNORE_NETS="$IGNORE_NETS"
+# Точечные исключения "пользователь@адрес": не уведомлять только при совпадении обоих.
+IGNORE_PAIRS="$IGNORE_PAIRS"
 
 # Приоритет Gotify: 8 и выше пробивает «не беспокоить» на Android.
 PRIORITY_OPEN=${PRIORITY_OPEN:-7}
@@ -767,7 +799,7 @@ HTTP_TIMEOUT=${HTTP_TIMEOUT:-10}
 GEO_TIMEOUT=${GEO_TIMEOUT:-5}
 
 # Файл истории входов и выходов, пусто — не вести.
-# Смотреть: ssh-notify-ctl logs
+# Смотреть: ssh-notify logs
 LOG_FILE="$LOG_FILE"
 EOF
   chown root:root "$CONF"; chmod 600 "$CONF"
@@ -836,46 +868,86 @@ EOF
     info "строка добавлена в $PAMFILE (бэкап рядом)"
   fi
 
-  cat <<MSG
+  if [ "$have_conf" = "1" ]; then
+    cat <<MSG
+
+Готово. Настройки в $CONF не менялись.
+
+  ssh-notify status
+  ssh-notify logs
+MSG
+  else
+    cat <<MSG
 
 Готово.
 
 НЕ ЗАКРЫВАЙ эту сессию. Зайди по SSH из другого терминала —
 должно прийти уведомление о входе, на exit — о выходе.
 
-  ssh-notify-ctl status      состояние
-  ssh-notify-ctl test        проверить отправку
-  ssh-notify-ctl logs        история входов и выходов
-  ssh-notify-ctl uninstall   удалить
+Остальные настройки (гео, списки исключений, файл лога, приоритеты) —
+в $CONF, там на каждую свой комментарий. Отредактируй и сохрани,
+перечитывается на каждый вход, переустанавливать не нужно.
+
+  ssh-notify status      состояние
+  ssh-notify test        проверить отправку
+  ssh-notify logs        история входов и выходов
+  ssh-notify update      обновиться с GitHub
+  ssh-notify uninstall   удалить
 
 Если что-то не пришло:  journalctl -t ssh-notify -n 20
 
 Если вход сломался, в этой сессии:
   sudo sed -i '/ssh-notify-wrap/d' $PAMFILE
 MSG
+  fi
+}
+
+# Скачивает свежий install-ssh-notify.sh с GitHub, кладёт поверх себя
+# и переустанавливает поверх текущих настроек — их спрашивать не нужно,
+# они уже лежат в $CONF.
+cmd_update() {
+  [ -f "$CONF" ] || die "не установлено, сначала: ssh-notify install"
+  echo "Скачиваю свежую версию с GitHub..."
+  local tmp
+  tmp=$(mktemp)
+  if ! curl -fsSL "$REPO_RAW/install-ssh-notify.sh" -o "$tmp"; then
+    rm -f "$tmp"
+    die "не смог скачать install-ssh-notify.sh, проверь сеть"
+  fi
+  # Грубая защита от пустого файла или страницы ошибки вместо скрипта.
+  grep -q '^VERSION=' "$tmp" || { rm -f "$tmp"; die "скачанный файл не похож на install-ssh-notify.sh, обновление отменено"; }
+  install -m 755 -o root -g root "$tmp" "$CTL"
+  rm -f "$tmp"
+  info "команда обновлена: $CTL"
+  echo "Переустанавливаю с текущими настройками..."
+  exec "$CTL" install
 }
 
 # ---------- разбор аргументов ----------
-CMD="${1:-install}"
+# Без аргументов — не install, а info: команды, версия, статус. Ставить
+# по умолчанию небезопасно, install нужно вызывать явно.
+CMD="${1:-info}"
 
 # Имя команды проверяем до root: за опечатку просить sudo невежливо.
 case "$CMD" in
   help|--help|-h)    usage; exit 0 ;;
-  version|--version) echo "ssh-notify-ctl $VERSION"; exit 0 ;;
+  version|--version) echo "ssh-notify $VERSION"; exit 0 ;;
   logs|--logs|log|--log)
     # Справка по logs — тоже без root.
     case "${2:-}" in -h|--help) log_usage; exit 0 ;; esac
     ;;
-  install|--install|test|--test|status|--status|uninstall|--uninstall|remove|purge) : ;;
+  info|install|--install|test|--test|status|--status|update|--update|uninstall|--uninstall|remove|purge) : ;;
   *) die "неизвестная команда: $CMD (см. ${0##*/} help)" ;;
 esac
 
 [ "$(id -u)" -eq 0 ] || die "нужен root: sudo ${0##*/} $CMD"
 
 case "$CMD" in
-  install|--install)                  cmd_install ;;
-  test|--test)                        cmd_test ;;
-  status|--status)                    cmd_status ;;
-  logs|--logs|log|--log)              shift; cmd_log "$@" ;;
-  uninstall|--uninstall|remove|purge) cmd_uninstall "${2:-}" ;;
+  info)                                cmd_info ;;
+  install|--install)                   cmd_install ;;
+  test|--test)                         cmd_test ;;
+  status|--status)                     cmd_status ;;
+  logs|--logs|log|--log)               shift; cmd_log "$@" ;;
+  update|--update)                     cmd_update ;;
+  uninstall|--uninstall|remove|purge)  cmd_uninstall "${2:-}" ;;
 esac

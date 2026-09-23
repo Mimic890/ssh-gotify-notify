@@ -27,18 +27,22 @@ Uptime:       up 12 days, 4 hours
 Скачай управляющую команду в `/usr/local/bin` и сделай исполняемой:
 
 ```bash
-sudo curl -fsSL https://raw.githubusercontent.com/Mimic890/ssh-gotify-notify/main/install-ssh-notify.sh -o /usr/local/bin/ssh-notify-ctl && sudo chmod +x /usr/local/bin/ssh-notify-ctl
+sudo curl -fsSL https://raw.githubusercontent.com/Mimic890/ssh-gotify-notify/main/install-ssh-notify.sh -o /usr/local/bin/ssh-notify && sudo chmod +x /usr/local/bin/ssh-notify
 ```
 
-Дальше всё делается командой `ssh-notify-ctl`, путь помнить не нужно:
+Дальше всё делается командой `ssh-notify`, путь помнить не нужно:
 
 ```bash
-sudo ssh-notify-ctl install
+sudo ssh-notify install
 ```
 
-Установщик спросит URL и токен, поставит `curl` и `jq`, отправит два
-тестовых сообщения — и только если они дошли, тронет PAM. Не дошли —
-ничего не меняется.
+Установщик спросит только URL и токен (это разово, дальше не спрашивает
+ничего), поставит `curl` и `jq`, отправит два тестовых сообщения — и
+только если они дошли, тронет PAM. Не дошли — ничего не меняется.
+Остальные настройки (гео, списки исключений, файл лога, приоритеты) — не
+через диалог, а прямо в `/etc/ssh-notify.conf`: файл со своими
+комментариями на каждую настройку, правится руками и перечитывается на
+каждый вход без перезапуска.
 
 Поддерживаются Debian, Ubuntu, Arch, Fedora, openSUSE и Alpine: пакеты
 ставятся через `apt-get`, `pacman`, `dnf`, `yum`, `zypper` или `apk` —
@@ -47,27 +51,44 @@ sudo ssh-notify-ctl install
 ### Команды
 
 ```bash
-sudo ssh-notify-ctl status
+ssh-notify
+```
+
+Без аргументов (нужен root) — список команд, версия, статус, кто сегодня
+заходил и кто залогинен прямо сейчас. То же самое, что `ssh-notify status`,
+только со справкой сверху.
+
+```bash
+sudo ssh-notify status
 ```
 
 ```bash
-sudo ssh-notify-ctl test
+sudo ssh-notify test
 ```
 
 ```bash
-sudo ssh-notify-ctl logs
+sudo ssh-notify logs
 ```
 
 ```bash
-sudo ssh-notify-ctl install
+sudo ssh-notify install
 ```
 
 ```bash
-sudo ssh-notify-ctl uninstall
+sudo ssh-notify update
 ```
 
-`install` можно запускать повторно — это же и есть перенастройка: на
-любой вопрос Enter оставляет текущее значение.
+Скачивает свежую версию установщика с GitHub, ставит её поверх себя и
+сразу переустанавливается с уже сохранёнными в конфиге настройками —
+ничего заново не спрашивает.
+
+```bash
+sudo ssh-notify uninstall
+```
+
+`install` можно запускать повторно: если конфиг уже есть, install ничего
+не спрашивает, просто обновляет свои файлы и PAM-строку поверх. Сменить
+настройки — не через install, а прямым редактированием `/etc/ssh-notify.conf`.
 
 ### История входов
 
@@ -91,11 +112,11 @@ Uptime:       up 12 days, 4 hours
 подсвечивать:
 
 ```bash
-sudo ssh-notify-ctl logs -n 5
+sudo ssh-notify logs -n 5
 ```
 
 ```bash
-sudo ssh-notify-ctl logs -f
+sudo ssh-notify logs -f
 ```
 
 | Опция | Что делает |
@@ -116,7 +137,7 @@ sudo ssh-notify-ctl logs -f
 Фильтры комбинируются и работают в том числе с `-f`:
 
 ```bash
-sudo ssh-notify-ctl logs -u alice --since today --failed
+sudo ssh-notify logs -u alice --since today --failed
 ```
 
 Ротацию ставит сам установщик в `/etc/logrotate.d/ssh-notify`: еженедельно,
@@ -132,14 +153,13 @@ journalctl -t ssh-notify | grep 'user=alice'
 ```
 
 `uninstall` убирает всё: строку из PAM, скрипты, состояние, свои бэкапы
-PAM и саму команду `ssh-notify-ctl`. Про конфиг с токеном спросит
+PAM и саму команду `ssh-notify`. Про конфиг с токеном спросит
 отдельно (`--yes` — удалить без вопросов). `sshd_config` не трогается.
 
 ### NixOS
 
 Установщик здесь не нужен и откажется работать. Возьми из репозитория
-два файла — `ssh-notify.nix` и `ssh-notify.sh`, — положи рядом друг с
-другом в свои модули и подключи:
+один файл — `ssh-notify.nix`, — положи в свои модули и подключи:
 
 ```nix
 imports = [ ./ssh-notify.nix ];
@@ -147,13 +167,39 @@ imports = [ ./ssh-notify.nix ];
 services.sshNotify = {
   enable = true;
   url = "https://gotify.example.com";
-  tokenFile = config.sops.secrets.gotify-ssh-token.path;
+  token = "AgNGgB5xE.sdkVy1O";
   ignoreNets = [ "10.*" "192.168.*" ];
+  ignorePairs = [ "admin@192.168.1.10" ];
 };
 ```
 
-`tokenFile` — путь строкой, а не literal-путь вида `./token`: второй Nix
-скопировал бы в `/nix/store`, читаемый любым пользователем системы.
+`token` — прямым текстом, проще всего для быстрой настройки, но попадает
+в `/nix/store` и в конфиг в открытом виде, читаемые любым пользователем
+системы. Если это важно — используй `tokenFile` вместо него:
+
+```nix
+services.sshNotify = {
+  # ...
+  tokenFile = config.sops.secrets.gotify-ssh-token.path;
+};
+```
+
+Передавай путь строкой (sops-nix, agenix), а не literal-путь вида
+`./token`: второй Nix скопировал бы в `/nix/store` точно так же. Если
+заданы оба, побеждает `tokenFile`.
+
+После `enable = true` и пересборки в системе появляется команда
+`ssh-notify` — упрощённый аналог установщика для диагностики
+(настройки на NixOS правятся не конфигом, а модулем, поэтому `install`,
+`uninstall` и `update` ей не нужны — обновление модуля идёт через
+`nixos-rebuild`):
+
+```bash
+ssh-notify           # без аргументов — команды, версия, статус, кто заходил сегодня и кто сейчас в системе
+ssh-notify status    # PAM подключён? UsePAM? сколько записей в логе?
+ssh-notify test      # отправить тестовые сообщения о входе и выходе
+ssh-notify logs      # история входов и выходов, те же опции, что ниже
+```
 
 ## Настройки
 
@@ -171,6 +217,7 @@ services.sshNotify = {
 | `NOTIFY_CLOSE` | `1` | `0` — молчать про выход |
 | `IGNORE_USERS` | пусто | Не уведомлять об этих пользователях |
 | `IGNORE_NETS` | пусто | Не уведомлять об этих адресах |
+| `IGNORE_PAIRS` | пусто | Не уведомлять об этих парах `пользователь@адрес` |
 | `PRIORITY_OPEN` | `7` | Приоритет уведомления о входе |
 | `PRIORITY_CLOSE` | `3` | Приоритет уведомления о выходе |
 | `HTTP_TIMEOUT` | `10` | Таймаут запроса к Gotify, секунды |
@@ -191,6 +238,18 @@ IGNORE_NETS="10.* 192.168.* 203.0.113.5"
 Без них резервные копии и мониторинг будут звонить в телефон круглые
 сутки, а алерты, которые звонят слишком часто, перестают работать.
 
+`IGNORE_USERS`/`IGNORE_NETS` глушат пользователя или адрес целиком. Если
+нужно молчать только про конкретную комбинацию — например, о своих
+собственных заходах из дома, но не о заходах того же аккаунта откуда-то
+ещё — используй `IGNORE_PAIRS`: список `пользователь@адрес` через пробел,
+где обе части снова glob-шаблоны:
+
+```sh
+IGNORE_PAIRS="admin@192.168.1.10 admin@10.0.0.*"
+```
+
+Тот же `admin`, зашедший не из этих сетей, уведомление всё равно получит.
+
 ## Диагностика
 
 Скрипт пишет в syslog под тегом `ssh-notify` — и успехи, и любой сбой
@@ -203,7 +262,7 @@ journalctl -t ssh-notify -n 20
 Проверить отправку, не заходя по SSH:
 
 ```bash
-sudo ssh-notify-ctl test
+sudo ssh-notify test
 ```
 
 Если вход по SSH сломался, из уже открытой сессии:
@@ -224,8 +283,8 @@ sudo sed -i '/ssh-notify-wrap/d' /etc/pam.d/sshd
 
 | Путь | Что это |
 | --- | --- |
-| `/usr/local/bin/ssh-notify-ctl` | управляющая команда (этот же установщик) |
-| `/usr/local/bin/ssh-notify` | рабочий скрипт, шлёт уведомление |
+| `/usr/local/bin/ssh-notify` | управляющая команда (этот же установщик) |
+| `/usr/local/bin/ssh-notify-worker` | рабочий скрипт, шлёт уведомление |
 | `/usr/local/bin/ssh-notify-wrap` | обёртка для `pam_exec` |
 | `/etc/ssh-notify.conf` | настройки и токен, права 600 |
 | `/var/log/ssh-notify.log` | история входов и выходов, права 640 root:adm |
@@ -239,13 +298,39 @@ sudo sed -i '/ssh-notify-wrap/d' /etc/pam.d/sshd
 подчищаются автоматически.
 
 `ssh-notify.sh` в репозитории — единственный источник правды.
-`ssh-notify.nix` читает его через `builtins.readFile`, а
-`install-ssh-notify.sh` носит встроенную копию, чтобы оставаться
-однофайловым для `curl`. После правки скрипта:
+`ssh-notify.nix` и `install-ssh-notify.sh` носят встроенные копии, чтобы
+каждый из них ставился одним файлом — .nix без соседнего .sh, установщик
+без ничего, кроме себя самого для `curl`. После правки скрипта:
 
 ```bash
 ./tools/sync-embedded.sh
 ```
+
+### Обновление с версии до 2.1
+
+До 2.1 управляющая команда называлась `ssh-notify-ctl`, а
+`/usr/local/bin/ssh-notify` был рабочим скриптом. С 2.1 наоборот: короткое
+имя `ssh-notify` — у команды управления, воркер переехал в
+`ssh-notify-worker`. Проще всего обновиться так — из уже установленной
+2.0:
+
+```bash
+sudo ssh-notify-ctl update
+```
+
+если `update` ещё нет (совсем старая версия) — обычным способом, сразу
+следом за установщиком:
+
+```bash
+sudo curl -fsSL https://raw.githubusercontent.com/Mimic890/ssh-gotify-notify/main/install-ssh-notify.sh -o /usr/local/bin/ssh-notify && sudo chmod +x /usr/local/bin/ssh-notify && sudo ssh-notify install
+```
+
+Между скачиванием и `install` — окно в пару секунд, когда уведомления не
+приходят (curl перетирает старый воркер новой командой управления, пока
+`install` не пересоздаст воркер под новым именем и не перепишет обёртку).
+На сам вход это не влияет: правило PAM `optional`. `install` подтянет
+текущий `/etc/ssh-notify.conf` без переспроса и уберёт `ssh-notify-ctl`
+как устаревший файл.
 
 ## Ограничения
 
