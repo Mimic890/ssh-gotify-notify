@@ -373,32 +373,71 @@ let
     }
 
     cmd_status() {
-      local today_users now_users
-      echo "ssh-notify ($VERSION_NIX)"
-      echo "Скрипт:    ${notify}/bin/ssh-notify"
-      echo "Обёртка:   ${wrapper}/bin/ssh-notify-wrap"
-      echo "Конфиг:    ${confFile}"
-      echo -n "PAM:       "
-      grep -q 'ssh-notify-wrap' /etc/pam.d/sshd 2>/dev/null \
-        && echo "подключено" || echo "НЕ подключено"
-      echo -n "UsePAM:    "
-      if out=$(sshd -T 2>/dev/null); then
-        printf '%s' "$out" | grep -qi '^usepam yes' && echo yes || echo no
-      else
-        echo "неизвестно (sshd -T не отработал)"
+      local c_ok='' c_bad='' c_dim='' c_bold='' c_reset=''
+      if [ -t 1 ] && [ -z "''${NO_COLOR:-}" ]; then
+        c_ok=$'\033[1;32m'; c_bad=$'\033[1;31m'; c_dim=$'\033[2m'
+        c_bold=$'\033[1m'; c_reset=$'\033[0m'
       fi
-      echo "Сессии:    $(find /run/ssh-notify -maxdepth 1 -type f 2>/dev/null | wc -l) активных"
+      row() { printf '  %s%s:%s %s\n' "$c_dim" "$1" "$c_reset" "$2"; }
+      onoff() { [ "$1" = "1" ] && printf '%sвкл%s' "$c_ok" "$c_reset" || printf '%sвыкл%s' "$c_dim" "$c_reset"; }
+
+      echo "''${c_bold}ssh-notify ($VERSION_NIX)''${c_reset}"
+      echo
+      row "Скрипт"  "${notify}/bin/ssh-notify"
+      row "Обёртка" "${wrapper}/bin/ssh-notify-wrap"
+      row "Конфиг"  "${confFile}"
+      echo
+
+      local pam_state
+      if grep -q 'ssh-notify-wrap' /etc/pam.d/sshd 2>/dev/null; then
+        pam_state="''${c_ok}подключено''${c_reset}"
+      else
+        pam_state="''${c_bad}НЕ подключено''${c_reset}"
+      fi
+      local usepam_c
+      if out=$(sshd -T 2>/dev/null); then
+        if printf '%s' "$out" | grep -qi '^usepam yes'; then
+          usepam_c="''${c_ok}yes''${c_reset}"
+        else
+          usepam_c="''${c_bad}no''${c_reset}"
+        fi
+      else
+        usepam_c="''${c_dim}неизвестно''${c_reset}"
+      fi
+      row "PAM"    "$pam_state    UsePAM $usepam_c"
+      row "Сессии" "$(find /run/ssh-notify -maxdepth 1 -type f 2>/dev/null | wc -l) активных"
+
+      local today_users now_users
       today_users=$(last -s today 2>/dev/null | awk '$1!="" && $1!="wtmp" && $1!="reboot"{print $1}' | sort -u | paste -sd' ' -) || true
       now_users=$(who 2>/dev/null | awk '{print $1}' | sort -u | paste -sd' ' -) || true
-      echo "Логинились сегодня: ''${today_users:-—}"
-      echo "Залогинены сейчас:  ''${now_users:-—}"
+      row "Сегодня" "''${today_users:-—}"
+      row "Сейчас"  "''${now_users:-—}"
+
       if [ -n "$LOG_FILE" ]; then
-        echo "Лог:       $LOG_FILE ($(grep -c '^=== ' "$LOG_FILE" 2>/dev/null || echo 0) записей)"
+        row "Лог" "$LOG_FILE ($(grep -c '^=== ' "$LOG_FILE" 2>/dev/null || echo 0) записей)"
       else
-        echo "Лог:       выключен"
+        row "Лог" "выключен"
       fi
-      echo "--- журнал ---"
-      journalctl -t ssh-notify -n 10 --no-pager 2>/dev/null || echo "journalctl недоступен"
+      echo
+
+      row "Gotify"     "${cfg.url}"
+      row "Гео"        "$(onoff ${bool cfg.geoLookup})"
+      row "Только TTY" "$(onoff ${bool cfg.requireTty})"
+      row "О выходе"   "$(onoff ${bool cfg.notifyClose})"
+      echo
+
+      if [ -n "$LOG_FILE" ] && [ -f "$LOG_FILE" ]; then
+        echo "''${c_bold}Последние события''${c_reset}"
+        grep '^=== ' "$LOG_FILE" | tail -3 | while IFS= read -r line; do
+          local c="$c_reset"
+          case "$line" in
+            *' · вход · '*)    c="$c_ok" ;;
+            *'НЕ ДОСТАВЛЕНО'*) c="$c_bad" ;;
+          esac
+          printf '  %s%s%s\n' "$c" "$(printf '%s' "$line" | sed 's/^=== //; s/ ===$//')" "$c_reset"
+        done
+        echo "  ''${c_dim}(полная история: ssh-notify logs)''${c_reset}"
+      fi
     }
 
     cmd_test() {

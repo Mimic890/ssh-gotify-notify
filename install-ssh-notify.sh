@@ -447,35 +447,87 @@ cmd_info() {
 }
 
 cmd_status() {
-  echo "ssh-notify $VERSION"
-  echo "Команда:   $([ -x "$CTL" ] && echo "$CTL" || echo 'не в PATH')"
-  echo "Скрипт:    $([ -x "$MAIN" ] && echo "$MAIN" || echo 'нет')"
-  echo "Обёртка:   $([ -x "$WRAP" ] && echo "$WRAP" || echo 'нет')"
-  echo "Конфиг:    $([ -f "$CONF" ] && echo "$CONF" || echo 'нет')"
-  echo -n "PAM:       "
-  grep -q 'ssh-notify-wrap' "$PAMFILE" 2>/dev/null \
-    && echo "подключено в $PAMFILE" || echo "НЕ подключено"
-  echo "UsePAM:    $(usepam_state)"
-  echo "Сессии:    $(find "$STATE" -maxdepth 1 -type f 2>/dev/null | wc -l) активных"
+  local c_ok='' c_bad='' c_dim='' c_bold='' c_reset=''
+  if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    c_ok=$'\033[1;32m'; c_bad=$'\033[1;31m'; c_dim=$'\033[2m'
+    c_bold=$'\033[1m'; c_reset=$'\033[0m'
+  fi
+  # Без padding: %-Ns в printf считает байты, а не символы, и с кириллицей
+  # (2 байта на букву) колонки съезжают вкривь.
+  row() { printf '  %s%s:%s %s\n' "$c_dim" "$1" "$c_reset" "$2"; }
+
+  echo "${c_bold}ssh-notify $VERSION${c_reset}"
+  echo
+  row "Команда"  "$([ -x "$CTL" ]  && echo "$CTL"  || printf '%sне в PATH%s' "$c_bad" "$c_reset")"
+  row "Скрипт"   "$([ -x "$MAIN" ] && echo "$MAIN" || printf '%sнет%s' "$c_bad" "$c_reset")"
+  row "Обёртка"  "$([ -x "$WRAP" ] && echo "$WRAP" || printf '%sнет%s' "$c_bad" "$c_reset")"
+  row "Конфиг"   "$([ -f "$CONF" ] && echo "$CONF" || printf '%sнет%s' "$c_bad" "$c_reset")"
+  echo
+
+  local pam_state
+  if grep -q 'ssh-notify-wrap' "$PAMFILE" 2>/dev/null; then
+    pam_state="${c_ok}подключено${c_reset}"
+  else
+    pam_state="${c_bad}НЕ подключено${c_reset}"
+  fi
+  local usepam usepam_c
+  usepam=$(usepam_state)
+  case "$usepam" in
+    yes) usepam_c="${c_ok}yes${c_reset}" ;;
+    no)  usepam_c="${c_bad}no${c_reset}" ;;
+    *)   usepam_c="${c_dim}неизвестно${c_reset}" ;;
+  esac
+  row "PAM"      "$pam_state    UsePAM $usepam_c"
+  row "Сессии"   "$(find "$STATE" -maxdepth 1 -type f 2>/dev/null | wc -l) активных"
+
   local today_users now_users
   today_users=$(last -s today 2>/dev/null | awk '$1!="" && $1!="wtmp" && $1!="reboot"{print $1}' | sort -u | paste -sd' ' -) || true
   now_users=$(who 2>/dev/null | awk '{print $1}' | sort -u | paste -sd' ' -) || true
-  echo "Логинились сегодня: ${today_users:-—}"
-  echo "Залогинены сейчас:  ${now_users:-—}"
+  row "Сегодня"  "${today_users:-—}"
+  row "Сейчас"   "${now_users:-—}"
+
   local lf=""
   [ -f "$CONF" ] && lf=$(. "$CONF" 2>/dev/null; printf '%s' "${LOG_FILE:-}")
   if [ -n "$lf" ]; then
-    echo "Лог:       $lf ($(grep -c '^=== ' "$lf" 2>/dev/null || echo 0) записей)"
+    row "Лог" "$lf ($(grep -c '^=== ' "$lf" 2>/dev/null || echo 0) записей)"
   else
-    echo "Лог:       выключен"
+    row "Лог" "выключен"
   fi
+  echo
+
   if [ -f "$CONF" ]; then
-    echo "--- настройки (без токена) ---"
-    grep -v '^GOTIFY_TOKEN=' "$CONF" | grep -v '^\s*$' || true
+    (
+      GEO_LOOKUP=1; REQUIRE_TTY=0; NOTIFY_CLOSE=1
+      IGNORE_USERS=""; IGNORE_NETS=""; IGNORE_PAIRS=""
+      # shellcheck source=/dev/null
+      . "$CONF" 2>/dev/null
+      onoff() { [ "$1" = "1" ] && printf '%sвкл%s' "$c_ok" "$c_reset" || printf '%sвыкл%s' "$c_dim" "$c_reset"; }
+      row "Gotify"     "${GOTIFY_URL:-—}"
+      row "Гео"        "$(onoff "$GEO_LOOKUP")"
+      row "Только TTY" "$(onoff "$REQUIRE_TTY")"
+      row "О выходе"   "$(onoff "$NOTIFY_CLOSE")"
+      [ -n "$IGNORE_USERS" ] && row "Игнор юзеры" "$IGNORE_USERS"
+      [ -n "$IGNORE_NETS" ]  && row "Игнор сети"  "$IGNORE_NETS"
+      [ -n "$IGNORE_PAIRS" ] && row "Игнор пары"  "$IGNORE_PAIRS"
+      # Последняя команда сабшелла — [ -n ... ] && ...; пустой список даёт код
+      # 1, а под set -e это выходом из сабшелла оборвало бы весь скрипт.
+      true
+    )
+    echo
   fi
-  echo "--- журнал ---"
-  journalctl -t ssh-notify -n 10 --no-pager 2>/dev/null \
-    || echo "journalctl недоступен, смотри /var/log/auth.log"
+
+  if [ -n "$lf" ] && [ -f "$lf" ]; then
+    echo "${c_bold}Последние события${c_reset}"
+    grep '^=== ' "$lf" | tail -3 | while IFS= read -r line; do
+      local c="$c_reset"
+      case "$line" in
+        *' · вход · '*)         c="$c_ok" ;;
+        *'НЕ ДОСТАВЛЕНО'*)      c="$c_bad" ;;
+      esac
+      printf '  %s%s%s\n' "$c" "$(printf '%s' "$line" | sed 's/^=== //; s/ ===$//')" "$c_reset"
+    done
+    echo "  ${c_dim}(полная история: ssh-notify logs)${c_reset}"
+  fi
 }
 
 cmd_test() {
